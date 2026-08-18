@@ -145,6 +145,15 @@ side of the transfer.
 through its generic extractor *and* the media sites `curl` cannot see, so
 nothing is lost by picking it first.
 
+A video comes back as MP4 whenever the site offers one, because that is the
+container the browser preview, ffmpeg and whatever the file ends up on all read
+without argument. Sites that only serve VP9/Opus — YouTube above 1080p, mostly —
+hand out video and audio as two separate WebM streams, so joining them into an
+MP4, and remuxing a finished WebM into one, is ffmpeg's job; without ffmpeg the
+format chain falls back to the best single file the site has. Plain file links
+are unaffected: the generic extractor has exactly one format, and it is usually
+not a video at all.
+
 ## Web interface
 
 ```

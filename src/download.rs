@@ -103,9 +103,9 @@ pub fn fetch(
                 // Long titles are truncated: some filesystems still cap a
                 // component at 255 bytes.
                 "%(title).150s.%(ext)s",
-                "--",
-                url,
             ]);
+            cmd.args(mp4_args(crate::video::available()));
+            cmd.args(["--", url]);
         }
         Tool::Curl => {
             cmd.args([
@@ -174,6 +174,35 @@ pub fn fetch(
     }
     progress(dir_size(dir));
     found.ok_or_else(|| format!("{} n'a produit aucun fichier", tool.name()))
+}
+
+/// Format selection for yt-dlp: a video comes back as MP4 whenever the site
+/// offers one, because that is the container everything else here — the
+/// browser preview, ffmpeg, the phone the file ends up on — reads without
+/// argument.
+///
+/// Sites that only serve VP9/Opus (YouTube above 1080p, mostly) hand out video
+/// and audio as separate WebM streams, and gluing them into an MP4 is ffmpeg's
+/// job. Without ffmpeg those selectors would fail outright, so the chain falls
+/// back to whatever single file the site has. The last `/b` in both chains is
+/// what makes a plain file link still work: the generic extractor has one
+/// format and it is not a video at all.
+fn mp4_args(ffmpeg: bool) -> &'static [&'static str] {
+    if ffmpeg {
+        &[
+            "-f",
+            "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+            // Only applies when two streams had to be joined.
+            "--merge-output-format",
+            "mp4",
+            // And this one rewrites a finished WebM/MKV video into MP4 without
+            // re-encoding it. Non-video downloads are left alone.
+            "--remux-video",
+            "mp4",
+        ]
+    } else {
+        &["-f", "b[ext=mp4]/b"]
+    }
 }
 
 /// `curl -O` with a URL that ends in `/`: nothing to name the file after, so
