@@ -18,6 +18,7 @@ compactor bench <input>          timing report
 compactor serve                  drag-and-drop web interface
 compactor video <input> [output] lossy video re-encode through ffmpeg
 compactor convert --to EXT <input> [output]   format conversion through ffmpeg
+compactor dl <url> [dir]         download a link through yt-dlp or curl
 ```
 
 Options:
@@ -30,6 +31,7 @@ Options:
 | `--port N` | Port for `serve`, default 8787. |
 | `--host ADDR` | Address for `serve`, default 127.0.0.1. |
 | `--max-size N` | Largest upload `serve` accepts, in MiB, default 512. |
+| `-c` | For `dl`: compress the downloaded file and keep only the `.cpt`. |
 
 Options for `video` only:
 
@@ -119,11 +121,39 @@ Refusing to overwrite the input is not a plain path comparison: `clip.mp4` and
 `./clip.mp4` are recognised as the same file, case-insensitively on Windows,
 because ffmpeg reading and writing one file at once destroys it.
 
+## Downloading
+
+```
+compactor dl https://example.com/dump.sql            # into the current directory
+compactor dl -c -l 8 https://example.com/dump.sql .  # and compress what came back
+```
+
+Nothing here speaks HTTP itself. The transfer is handed to `yt-dlp` when it is
+on PATH and to `curl` otherwise, both invoked with separate argv entries so no
+part of the URL is ever seen by a shell. Only `http://` and `https://` are
+accepted: every other scheme is a way to read something local that the caller
+did not mean to expose, and a URL starting with `-` would be read as an option
+by both tools.
+
+The downloader picks the file name — from the URL, from `Content-Disposition`,
+or from the media title — so it is given a scratch directory of its own and the
+result is moved out once the name is known. Progress is the number of bytes on
+disk, sampled four times a second, because neither tool reports a total this
+side of the transfer.
+
+`yt-dlp` is preferred when both are installed: it covers plain file links
+through its generic extractor *and* the media sites `curl` cannot see, so
+nothing is lost by picking it first.
+
 ## Web interface
 
 ```
 compactor serve            # then open http://127.0.0.1:8787
 ```
+
+The page has two tabs. **Compresseur** is the drag-and-drop interface described
+below; **Téléchargement** takes a link, fetches it server-side and hands the
+file back to the browser, optionally running the codec on it first.
 
 Drop files on the page, paste them from the clipboard with Ctrl+V, or click to
 browse. Images and videos get a thumbnail, every file gets a live progress bar,
@@ -146,6 +176,16 @@ JSON carries a `unit` field.
 Next to it is a conversion panel — target format, quality, size, frame rate,
 audio — under "Convertir le format". Its format list is not hard-coded in the
 page: `/api/config` returns the table from `src/convert.rs`, grouped by kind.
+
+The download tab posts to `/api/download?url=…`, which returns a job id like any
+other: the link travels in the query string and the request body stays empty, so
+a link to a several-gigabyte file costs one short request. `then=compress` chains
+the codec onto the downloaded bytes, at the level set by the slider in the
+compressor tab, and only the `.cpt` comes back — the file never makes the round
+trip through the browser twice. A downloaded file larger than `--max-size` is
+rejected once it lands, since the result is served out of memory. The tab stays
+visible when neither downloader is installed but says so instead of failing on
+the first click.
 
 The server is a local tool. It binds 127.0.0.1, caps the request body, buffers
 at most 16 KiB of headers and runs at most two jobs at a time, but it has no
@@ -284,6 +324,7 @@ than it took to make.
 | `src/main.rs` | CLI |
 | `src/server.rs` | HTTP server and job registry for `serve` |
 | `src/video.rs` | ffmpeg wrapper for `video` (lossy, optional) |
+| `src/download.rs` | yt-dlp / curl wrapper for `dl` and the download tab |
 | `src/convert.rs` | ffmpeg wrapper for `convert`: the format table and its encoder settings |
 | `src/ui.html` | the interface, embedded in the binary |
 | `src/model.rs` | predictor: context models, counters, mixer, SSE |

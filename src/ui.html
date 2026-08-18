@@ -116,18 +116,42 @@
     font-variant-numeric: tabular-nums; min-width: 1.6em; display: inline-block;
     text-align: center; color: var(--text); font-weight: 650;
   }
-  select, button, input[type=number] {
+  .tabs { display: flex; gap: 8px; margin: 0 0 16px; }
+  .tab {
+    background: var(--panel); color: var(--muted);
+    border: 1px solid var(--line-soft); border-radius: 999px;
+    padding: 8px 18px; font: inherit; font-size: 13.5px; font-weight: 650;
+    cursor: pointer; transition: color .15s, border-color .15s, background .15s;
+  }
+  .tab:hover { color: var(--text); border-color: var(--accent); }
+  .tab.on {
+    color: #0b0d12; border-color: transparent;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 8px 20px rgba(122, 162, 255, .28);
+  }
+  section[hidden] { display: none; }
+
+  #dlUrl { flex: 1 1 320px; min-width: 220px; cursor: text; }
+  #dlGo {
+    color: #0b0d12; font-weight: 650; border-color: transparent;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  }
+  #dlGo:hover { filter: brightness(1.08); background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+  #dlGo:disabled { filter: grayscale(1); opacity: .5; cursor: not-allowed; }
+
+  select, button, input[type=number], input[type=url] {
     background: var(--panel-2); color: var(--text);
     border: 1px solid var(--line); border-radius: 10px; padding: 7px 11px;
     font: inherit; font-size: 13px; cursor: pointer;
     transition: border-color .15s, background .15s;
   }
   input[type=number] { width: 6.5em; cursor: text; }
+  input[type=url]::placeholder { color: var(--muted); }
   button:hover, select:hover { border-color: var(--accent); background: #263049; }
   select:focus-visible, button:focus-visible, input:focus-visible {
     outline: 2px solid var(--accent); outline-offset: 2px;
   }
-  input[type=number]:focus { border-color: var(--accent); }
+  input[type=number]:focus, input[type=url]:focus { border-color: var(--accent); }
   #video[hidden] { display: none; }
   #video { margin-top: 10px; }
   #video .sep { width: 1px; align-self: stretch; background: var(--line); }
@@ -206,6 +230,12 @@
   </header>
   <p class="sub">Compression sans perte par mélange de contextes. Rien ne quitte votre machine&nbsp;: tout est traité par le processus local.</p>
 
+  <div class="tabs" role="tablist">
+    <button id="tabBtnCompress" class="tab on" type="button" role="tab" aria-selected="true">Compresseur</button>
+    <button id="tabBtnDownload" class="tab" type="button" role="tab" aria-selected="false">Téléchargement</button>
+  </div>
+
+  <section id="tabCompress">
   <div id="drop" tabindex="0">
     <strong>Déposez vos fichiers ici</strong>
     <span>ou collez (Ctrl+V) une image ou une vidéo, ou cliquez pour parcourir</span>
@@ -305,6 +335,34 @@
     remplir les deux étire l'image. La qualité est un CRF&nbsp;: plus bas =
     meilleure image et fichier plus gros.
   </p>
+  </section>
+
+  <section id="tabDownload" hidden>
+    <div class="controls">
+      <label for="dlUrl">Lien</label>
+      <input id="dlUrl" type="url" placeholder="https://exemple.com/fichier.zip" spellcheck="false" autocomplete="off">
+      <label class="switch"><input id="dlThen" type="checkbox"> Compresser après</label>
+      <button id="dlGo" type="button">Télécharger</button>
+      <button id="dlClear" type="button">Vider la liste</button>
+    </div>
+
+    <div id="dlList"></div>
+
+    <p class="note" id="dlNote">
+      Le fichier est récupéré par le serveur local, puis proposé au
+      navigateur&nbsp;: rien ne transite par un tiers. Le téléchargement passe par
+      <code>yt-dlp</code> quand il est installé &mdash; ce qui couvre aussi les liens
+      de vidéos &mdash; et sinon par <code>curl</code>, qui ne gère que les liens
+      directs. &laquo;&nbsp;Compresser après&nbsp;&raquo; applique le codec sans perte
+      au fichier reçu et ne renvoie que l'archive <code>.cpt</code>, au niveau
+      choisi dans l'onglet Compresseur.
+    </p>
+
+    <p class="note" id="dlMissing" hidden>
+      Ni <code>yt-dlp</code> ni <code>curl</code> n'ont été trouvés dans le
+      PATH&nbsp;: installez l'un des deux et relancez <code>compactor serve</code>.
+    </p>
+  </section>
 </main>
 
 <script>
@@ -333,6 +391,10 @@
   const ch = document.getElementById("ch");
   const cfps = document.getElementById("cfps");
   const caudio = document.getElementById("caudio");
+  const dlUrl = document.getElementById("dlUrl");
+  const dlThen = document.getElementById("dlThen");
+  const dlList = document.getElementById("dlList");
+  const dlGo = document.getElementById("dlGo");
 
 
   // Decorative background: a field of 67s, generated here rather than written
@@ -374,6 +436,12 @@
     document.getElementById("opConvert").hidden = !hasFfmpeg;
     document.getElementById("convertNote").hidden = !hasFfmpeg;
     fillFormats(c.formats || []);
+    // The download tab stays visible without a downloader, but says why it
+    // cannot work instead of failing on the first click.
+    const dl = c.downloader || null;
+    document.getElementById("dlMissing").hidden = !!dl;
+    dlGo.disabled = !dl;
+    if (dl === "yt-dlp") dlUrl.placeholder = "https://exemple.com/fichier.zip ou un lien vidéo";
   }).catch(() => {});
 
   level.oninput = () => { levelOut.textContent = level.value; };
@@ -437,7 +505,7 @@
     return Math.floor(t / 60) + ":" + String(t % 60).padStart(2, "0");
   }
 
-  function makeCard(file) {
+  function makeCard(file, host) {
     const card = document.createElement("div");
     card.className = "card";
 
@@ -483,8 +551,8 @@
     actions.className = "actions";
     card.appendChild(actions);
 
-    list.prepend(card);
-    return { meta, fill, actions };
+    (host || list).prepend(card);
+    return { meta, fill, actions, name };
   }
 
   async function submit(file) {
@@ -551,9 +619,17 @@
       const pct = j.total ? Math.min(100, j.done * 100 / j.total) : 0;
       ui.fill.style.width = pct.toFixed(1) + "%";
       if (j.state === "running") {
+        // A download job renames its card as soon as the server knows what
+        // the link actually points at.
+        if (j.name && ui.name.textContent !== j.name) ui.name.textContent = j.name;
         const verb = j.op === "video" ? "Ré-encodage"
           : j.op === "convert" ? "Conversion"
-          : j.op === "compress" ? "Compression" : "Décompression";
+          : j.op === "compress" ? "Compression"
+          : j.op === "download" ? "Téléchargement"
+          // The chained job counts bytes twice: nothing to total while the
+          // transfer runs, a real total once the codec starts.
+          : j.op === "download-compress" ? (j.total ? "Compression" : "Téléchargement")
+          : "Décompression";
         // A video job counts milliseconds of footage, not bytes, and its total
         // stays 0 while the duration is unknown (no ffprobe): show what has
         // been encoded so far and no percentage.
@@ -575,6 +651,13 @@
   function done(id, j, ui) {
     ui.fill.style.width = "100%";
     ui.fill.style.background = "var(--ok)";
+    if (j.name) ui.name.textContent = j.name;
+    if (j.op === "download") {
+      // Nothing was recoded, so a ratio would only ever read 100%.
+      ui.meta.textContent = human(j.out_size) + " téléchargé en " + j.secs.toFixed(1) + " s";
+      addLink(id, ui);
+      return;
+    }
     const ratio = j.in_size ? j.out_size * 100 / j.in_size : 0;
     // Only decompression is expected to grow: everywhere else a smaller output
     // is the good outcome and gets the green number.
@@ -590,12 +673,66 @@
       document.createTextNode(") en " + j.secs.toFixed(1) + " s")
     );
 
+    addLink(id, ui);
+  }
+
+  function addLink(id, ui) {
     const a = document.createElement("a");
     a.href = "/api/jobs/" + id + "/result";
     a.textContent = "Télécharger";
     a.download = "";
     ui.actions.appendChild(a);
   }
+
+  // Tabs: two panels, one visible at a time. The level slider lives in the
+  // compressor panel but applies to both, which is why the download note says
+  // where to change it.
+  const tabs = [
+    [document.getElementById("tabBtnCompress"), document.getElementById("tabCompress")],
+    [document.getElementById("tabBtnDownload"), document.getElementById("tabDownload")]
+  ];
+  for (const [btn, panel] of tabs) {
+    btn.onclick = () => {
+      for (const [b, p] of tabs) {
+        const on = b === btn;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        p.hidden = !on;
+      }
+      if (panel.id === "tabDownload") dlUrl.focus();
+    };
+  }
+
+  async function startDownload() {
+    const url = dlUrl.value.trim();
+    if (!url) { dlUrl.focus(); return; }
+    const ui = makeCard({ name: url, size: 0, type: "" }, dlList);
+    // Checked here as well as on the server, so a typo does not cost a round
+    // trip.
+    if (!/^https?:\/\//i.test(url)) {
+      fail(ui, "l'adresse doit commencer par http:// ou https://");
+      return;
+    }
+    ui.meta.textContent = "Connexion…";
+    const q = new URLSearchParams({ url: url, level: level.value });
+    if (dlThen.checked) q.set("then", "compress");
+    let id;
+    try {
+      const r = await fetch("/api/download?" + q, { method: "POST" });
+      const j = await r.json();
+      if (!r.ok) { fail(ui, j.error || r.statusText); return; }
+      id = j.id;
+    } catch (e) {
+      fail(ui, "serveur injoignable : " + e.message);
+      return;
+    }
+    dlUrl.value = "";
+    poll(id, null, ui);
+  }
+
+  dlGo.onclick = startDownload;
+  dlUrl.onkeydown = e => { if (e.key === "Enter") { e.preventDefault(); startDownload(); } };
+  document.getElementById("dlClear").onclick = () => { dlList.innerHTML = ""; };
 
   function addFiles(files) {
     for (const f of files) submit(f);

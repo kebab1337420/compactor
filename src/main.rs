@@ -1,6 +1,7 @@
 //! Command line front end for the Compactor codec.
 
 mod convert;
+mod download;
 mod server;
 mod video;
 
@@ -24,6 +25,7 @@ USAGE:
     compactor serve [--port N]               drag-and-drop web interface on localhost
     compactor video [video options] <in> [out]  re-encode a video (lossy, needs ffmpeg)
     compactor convert --to EXT <in> [out]    convert between formats (needs ffmpeg)
+    compactor dl <url> [dir]                 download a link (needs yt-dlp or curl)
 
 OPTIONS:
     -l N          compression level 0..9 (default 6). Higher = more memory, better ratio.
@@ -45,6 +47,11 @@ VIDEO OPTIONS (for `video`; lossy re-encode through ffmpeg, which must be on PAT
     --preset NAME x264/x265 speed preset, ultrafast..veryslow (default medium).
     --no-audio    drop the audio track.
 
+DOWNLOAD OPTIONS (for `dl`; goes through yt-dlp when present, else curl):
+    -c            compress the downloaded file to <name>.cpt and delete the
+                  original.
+    -l N          level for that compression.
+
 CONVERT OPTIONS (for `convert`; goes through ffmpeg too):
     --to EXT      target format. Also read from the output file name when given.
     --quality N   0..100, higher is better and bigger (default 75). Mapped to
@@ -59,6 +66,8 @@ struct Opts {
     port: u16,
     host: String,
     max_size: usize,
+    /// `dl -c`: compress what was downloaded.
+    compress: bool,
     to: Option<String>,
     quality: u8,
     video: video::Settings,
@@ -81,6 +90,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         port: 8787,
         host: "127.0.0.1".to_string(),
         max_size: 512,
+        compress: false,
         to: None,
         quality: 75,
         video: video::Settings::default(),
@@ -176,6 +186,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
                 o.quality = v as u8;
             }
             "--no-audio" => o.video.audio = false,
+            "-c" | "--compress" => o.compress = true,
             "-f" | "--force" => o.force = true,
             "-q" | "--quiet" => o.quiet = true,
             s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option {s}")),
@@ -439,6 +450,87 @@ fn run_convert(opts: &Opts, input: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `compactor dl <url> [dir]`: fetch a link into `dir` (the current directory
+/// by default), optionally compressing what comes back.
+fn run_download(opts: &Opts, url: &str) -> Result<(), String> {
+    let tool = download::available()
+        .ok_or("neither yt-dlp nor curl was found on PATH; the `dl` command needs one of them")?;
+    download::check_url(url)?;
+    let dir = PathBuf::from(opts.files.get(1).map(String::as_str).unwrap_or("."));
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+
+    // The downloader names the file itself, so it gets a scratch directory of
+    // its own and the result is moved next door once the name is known.
+    let scratch = dir.join(format!(".compactor-dl-{}", std::process::id()));
+    fs::create_dir_all(&scratch).map_err(|e| format!("cannot create {}: {e}", scratch.display()))?;
+
+    let t = Instant::now();
+    let mut last = 0usize;
+    let fetched = download::fetch(tool, url, &scratch, |bytes| {
+        if opts.quiet || bytes == last {
+            return;
+        }
+        last = bytes;
+        eprint!("\rdownloading: {}", human(bytes));
+        let _ = std::io::stderr().flush();
+    });
+    let fetched = match fetched {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&scratch);
+            return Err(e);
+        }
+    };
+
+    let name = fetched
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "telechargement".to_string());
+    let out_path = dir.join(&name);
+    let finish = |p: &PathBuf| -> Result<(), String> {
+        check_output(p, opts.force)?;
+        // A rename across the same filesystem is instant; the copy is the
+        // fallback for the cases where it is not.
+        if fs::rename(&fetched, p).is_err() {
+            fs::copy(&fetched, p).map_err(|e| format!("cannot write {}: {e}", p.display()))?;
+        }
+        Ok(())
+    };
+    let res = finish(&out_path);
+    let downloaded = fs::metadata(&fetched)
+        .or_else(|_| fs::metadata(&out_path))
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
+    if let Err(e) = res {
+        let _ = fs::remove_dir_all(&scratch);
+        return Err(e);
+    }
+    let _ = fs::remove_dir_all(&scratch);
+    let secs = t.elapsed().as_secs_f64();
+    if !opts.quiet {
+        eprintln!("\r\x1b[Kdownload: {} in {secs:.1}s", human(downloaded));
+    }
+
+    if !opts.compress {
+        println!("{}", out_path.display());
+        return Ok(());
+    }
+
+    let data = fs::read(&out_path).map_err(|e| format!("cannot read {}: {e}", out_path.display()))?;
+    let cpt = PathBuf::from(format!("{}.cpt", out_path.display()));
+    check_output(&cpt, opts.force)?;
+    let t = Instant::now();
+    let blob = compress(&data, opts.level);
+    let secs = t.elapsed().as_secs_f64();
+    fs::write(&cpt, &blob).map_err(|e| format!("cannot write {}: {e}", cpt.display()))?;
+    // The download was only a means to get the bytes: keeping both files is
+    // never what `-c` was asked for.
+    let _ = fs::remove_file(&out_path);
+    report("compress", data.len(), blob.len(), secs, opts.quiet);
+    println!("{}", cpt.display());
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() {
@@ -470,6 +562,11 @@ fn run() -> Result<(), String> {
     if cmd == "convert" {
         expect_files(&opts, 2)?;
         return run_convert(&opts, input);
+    }
+
+    if cmd == "dl" || cmd == "download" {
+        expect_files(&opts, 2)?;
+        return run_download(&opts, input);
     }
 
     let data = fs::read(input).map_err(|e| format!("cannot read {input}: {e}"))?;

@@ -21,6 +21,7 @@ use compactor::{
 };
 
 use crate::convert;
+use crate::download;
 use crate::video;
 
 const PAGE: &str = include_str!("ui.html");
@@ -71,12 +72,16 @@ struct Server {
     /// Whether ffmpeg answered at startup. Probed once: the page hides the
     /// re-encoding panel when it is missing.
     ffmpeg: bool,
+    /// Downloader found at startup, if any. Probed once: the page hides the
+    /// download tab when neither yt-dlp nor curl is on PATH.
+    downloader: Option<download::Tool>,
 }
 
 pub fn serve(host: &str, port: u16, default_level: u8, max_size_mib: usize) -> Result<(), String> {
     let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr).map_err(|e| format!("cannot bind {addr}: {e}"))?;
     let ffmpeg = video::available();
+    let downloader = download::available();
     let srv = Arc::new(Server {
         jobs: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),
@@ -84,6 +89,7 @@ pub fn serve(host: &str, port: u16, default_level: u8, max_size_mib: usize) -> R
         max_body: max_size_mib.saturating_mul(1024 * 1024),
         default_level,
         ffmpeg,
+        downloader,
     });
 
     println!("compactor serve: http://{addr}");
@@ -92,6 +98,10 @@ pub fn serve(host: &str, port: u16, default_level: u8, max_size_mib: usize) -> R
         println!("ffmpeg found: video re-encoding (fps, resolution) available");
     } else {
         println!("ffmpeg not on PATH: video re-encoding disabled");
+    }
+    match downloader {
+        Some(t) => println!("{} found: downloading from a link available", t.name()),
+        None => println!("neither yt-dlp nor curl on PATH: downloading disabled"),
     }
     if host != "127.0.0.1" && host != "localhost" {
         println!("warning: bound to {host}; the interface has no authentication.");
@@ -287,11 +297,15 @@ fn handle(srv: &Arc<Server>, stream: TcpStream) -> Result<(), String> {
             &mut out,
             "200 OK",
             &format!(
-                "{{\"default_level\":{},\"max_level\":{},\"max_size\":{},\"ffmpeg\":{},\"formats\":[{}]}}",
+                "{{\"default_level\":{},\"max_level\":{},\"max_size\":{},\"ffmpeg\":{},\"downloader\":{},\"formats\":[{}]}}",
                 srv.default_level,
                 MAX_LEVEL,
                 srv.max_body,
                 srv.ffmpeg,
+                match srv.downloader {
+                    Some(t) => json_string(t.name()),
+                    None => "null".to_string(),
+                },
                 convert::FORMATS
                     .iter()
                     .map(|f| format!(
@@ -310,6 +324,7 @@ fn handle(srv: &Arc<Server>, stream: TcpStream) -> Result<(), String> {
             ),
         ),
         ("POST", "/api/jobs") => post_job(srv, &req, &mut out),
+        ("POST", "/api/download") => post_download(srv, &req, &mut out),
         ("GET", p) if p.starts_with("/api/jobs/") => get_job(srv, p, &mut out),
         _ => send_error(&mut out, "404 Not Found", "no such route"),
     }
@@ -719,6 +734,165 @@ fn get_job(srv: &Arc<Server>, path: &str, out: &mut TcpStream) {
     send_json(out, "200 OK", &json);
 }
 
+/// Start a download job. Nothing is uploaded here: the body is empty and the
+/// URL travels in the query string, so a link to a several-gigabyte file costs
+/// one short request.
+fn post_download(srv: &Arc<Server>, req: &Request, out: &mut TcpStream) {
+    let Some(tool) = srv.downloader else {
+        send_error(
+            out,
+            "503 Service Unavailable",
+            "aucun téléchargeur trouvé : installez yt-dlp ou curl et relancez le serveur",
+        );
+        return;
+    };
+    let Some(url) = query_param(&req.query, "url") else {
+        send_error(out, "400 Bad Request", "paramètre url manquant");
+        return;
+    };
+    if let Err(e) = download::check_url(&url) {
+        send_error(out, "400 Bad Request", &e);
+        return;
+    }
+    // `then=compress` chains the codec onto the downloaded bytes, so the file
+    // never has to make the round trip through the browser twice.
+    let compress_after = query_param(&req.query, "then").as_deref() == Some("compress");
+    let level = query_param(&req.query, "level")
+        .and_then(|s| s.parse::<u8>().ok())
+        .filter(|l| *l <= MAX_LEVEL)
+        .unwrap_or(srv.default_level);
+
+    {
+        let mut running = srv.running.lock().unwrap();
+        if *running >= MAX_RUNNING {
+            send_error(
+                out,
+                "503 Service Unavailable",
+                "trop de tâches en cours, réessayez dans un instant",
+            );
+            return;
+        }
+        *running += 1;
+    }
+
+    let op = if compress_after {
+        "download-compress"
+    } else {
+        "download"
+    };
+    let id = srv.next_id.fetch_add(1, Ordering::SeqCst);
+    {
+        let mut jobs = srv.jobs.lock().unwrap();
+        evict(&mut jobs);
+        jobs.insert(
+            id,
+            Job {
+                state: State::Running,
+                done: 0,
+                // The size is unknown until the transfer ends: 0 means
+                // indeterminate and the page shows the bytes received without
+                // a percentage.
+                total: 0,
+                unit: "bytes",
+                in_size: 0,
+                out_size: 0,
+                secs: 0.0,
+                op,
+                // Replaced by the real file name as soon as it is known; until
+                // then the card shows the link.
+                name: url.clone(),
+                out_ext: String::new(),
+                error: String::new(),
+                result: Vec::new(),
+                created: id,
+            },
+        );
+    }
+
+    let srv2 = Arc::clone(srv);
+    thread::spawn(move || {
+        let res = run_download_job(&srv2, id, tool, &url, compress_after, level);
+        finish_job(&srv2, id, res);
+        *srv2.running.lock().unwrap() -= 1;
+    });
+
+    send_json(out, "202 Accepted", &format!("{{\"id\":{id}}}"));
+}
+
+/// Fetch the link into a temp directory of its own, then optionally compress
+/// what came back. The directory is removed whatever happens.
+fn run_download_job(
+    srv: &Arc<Server>,
+    id: u64,
+    tool: download::Tool,
+    url: &str,
+    compress_after: bool,
+    level: u8,
+) -> Result<(Vec<u8>, f64), String> {
+    let t = Instant::now();
+    let pid = std::process::id();
+    // A directory per job: the downloader picks the file name itself, so it
+    // needs a place where whatever it writes cannot collide with another job.
+    let dir = std::env::temp_dir().join(format!("compactor-{pid}-{id}-dl"));
+
+    let run = || -> Result<Vec<u8>, String> {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create temp dir: {e}"))?;
+        let file = download::fetch(tool, url, &dir, |bytes| {
+            if let Ok(mut jobs) = srv.jobs.lock() {
+                if let Some(j) = jobs.get_mut(&id) {
+                    j.done = bytes;
+                }
+            }
+        })?;
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "telechargement".to_string());
+        let data = std::fs::read(&file).map_err(|e| format!("cannot read download: {e}"))?;
+        if data.is_empty() {
+            return Err("le téléchargement est vide".into());
+        }
+        if data.len() > srv.max_body {
+            return Err(format!(
+                "fichier téléchargé plus gros que la limite du serveur ({} octets) ; relancez avec --max-size",
+                srv.max_body
+            ));
+        }
+        {
+            let mut jobs = srv.jobs.lock().unwrap();
+            if let Some(j) = jobs.get_mut(&id) {
+                j.name = name;
+                j.in_size = data.len();
+                j.done = data.len();
+                j.total = data.len();
+            }
+        }
+        if !compress_after {
+            return Ok(data);
+        }
+        // Second phase: the counters restart on the codec, which does know its
+        // total, so the bar becomes a real percentage here.
+        {
+            let mut jobs = srv.jobs.lock().unwrap();
+            if let Some(j) = jobs.get_mut(&id) {
+                j.done = 0;
+                j.total = data.len();
+            }
+        }
+        Ok(compress_with_progress(&data, level, |done| {
+            if let Ok(mut jobs) = srv.jobs.lock() {
+                if let Some(j) = jobs.get_mut(&id) {
+                    j.done = done;
+                }
+            }
+        }))
+    };
+
+    let res = run();
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok((res?, t.elapsed().as_secs_f64()))
+}
+
 /// Name proposed to the browser: `.cpt` appended when compressing, stripped
 /// when decompressing, and a `-reencode` suffix on a re-encoded video so it
 /// never lands on top of the original.
@@ -726,7 +900,8 @@ fn download_name(j: &Job) -> String {
     let base = j.name.rsplit(['/', '\\']).next().unwrap_or("fichier");
     let base = if base.is_empty() { "fichier" } else { base };
     match j.op {
-        "compress" => format!("{base}.cpt"),
+        "compress" | "download-compress" => format!("{base}.cpt"),
+        "download" => base.to_string(),
         "video" => {
             let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
             format!("{stem}-reencode.{}", j.out_ext)
