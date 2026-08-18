@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compactor</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --bg-2: #131722;
+    --panel: rgba(24, 28, 39, .82);
+    --panel-2: #202636;
+    --line: #2c3346;
+    --line-soft: rgba(255, 255, 255, .06);
+    --text: #e9edf6;
+    --muted: #98a2ba;
+    --accent: #7aa2ff;
+    --accent-2: #b98cff;
+    --ok: #4fd39a;
+    --warn: #f0bd6b;
+    --err: #ff6b7a;
+    --radius: 16px;
+    --shadow: 0 18px 40px rgba(0, 0, 0, .45);
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    color: var(--text);
+    background:
+      radial-gradient(900px 520px at 12% -8%, rgba(122, 162, 255, .20), transparent 60%),
+      radial-gradient(760px 480px at 92% 4%, rgba(185, 140, 255, .16), transparent 62%),
+      linear-gradient(180deg, var(--bg-2), var(--bg) 42%);
+    background-attachment: fixed;
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  /* Purely decorative wallpaper, painted behind everything and never
+     interactive. */
+  #wall {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    pointer-events: none;
+    user-select: none;
+    font-weight: 800;
+    color: #fff;
+  }
+  #wall b {
+    position: absolute;
+    display: block;
+    font-style: italic;
+    line-height: 1;
+    animation: drift linear infinite alternate;
+  }
+  @keyframes drift {
+    from { transform: translate3d(0, 0, 0) rotate(var(--rot, 0deg)); }
+    to   { transform: translate3d(0, -26px, 0) rotate(var(--rot, 0deg)); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #wall b { animation: none; }
+  }
+
+  main { position: relative; z-index: 1; max-width: 940px; margin: 0 auto; padding: 44px 20px 90px; }
+
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  h1 {
+    font-size: 30px; margin: 0; font-weight: 800; letter-spacing: -.02em;
+    background: linear-gradient(92deg, var(--text), var(--accent) 55%, var(--accent-2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .stamp {
+    font-weight: 800; font-size: 13px; font-style: italic; letter-spacing: .02em;
+    padding: 4px 10px; border-radius: 999px; color: #ffe3e3;
+    background: linear-gradient(140deg, #ff2f45, #b3121f);
+    box-shadow: 0 6px 16px rgba(255, 47, 69, .35);
+  }
+  .sub { color: var(--muted); font-size: 14.5px; margin: 0 0 26px; max-width: 62ch; }
+
+  #drop {
+    position: relative; overflow: hidden;
+    border: 1.5px dashed var(--line); border-radius: 22px; padding: 54px 20px;
+    text-align: center; background: var(--panel); backdrop-filter: blur(10px);
+    box-shadow: var(--shadow);
+    transition: border-color .18s, background .18s, transform .18s, box-shadow .18s;
+    cursor: pointer;
+  }
+  /* A big washed-out 67 sitting inside the drop zone. */
+  #drop::after {
+    content: "67";
+    position: absolute; right: 18px; bottom: -36px;
+    font-size: 130px; font-weight: 800; font-style: italic; line-height: 1;
+    color: rgba(255, 255, 255, .04); pointer-events: none;
+  }
+  #drop:hover { border-color: rgba(122, 162, 255, .55); }
+  #drop:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  #drop.hot {
+    border-color: var(--accent); background: rgba(122, 162, 255, .10);
+    transform: translateY(-2px); box-shadow: 0 22px 50px rgba(122, 162, 255, .22);
+  }
+  #drop strong { position: relative; display: block; font-size: 19px; margin-bottom: 8px; font-weight: 650; }
+  #drop span { position: relative; color: var(--muted); font-size: 13.5px; }
+
+  .controls {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    margin: 18px 0 8px; padding: 16px 18px;
+    background: var(--panel); backdrop-filter: blur(10px);
+    border: 1px solid var(--line-soft); border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .controls label { color: var(--muted); font-size: 13px; }
+  input[type=range] { width: 180px; accent-color: var(--accent); }
+  #levelOut, #crfOut {
+    font-variant-numeric: tabular-nums; min-width: 1.6em; display: inline-block;
+    text-align: center; color: var(--text); font-weight: 650;
+  }
+  select, button, input[type=number] {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px; padding: 7px 11px;
+    font: inherit; font-size: 13px; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  input[type=number] { width: 6.5em; cursor: text; }
+  button:hover, select:hover { border-color: var(--accent); background: #263049; }
+  select:focus-visible, button:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  input[type=number]:focus { border-color: var(--accent); }
+  #video[hidden] { display: none; }
+  #video { margin-top: 10px; }
+  #video .sep { width: 1px; align-self: stretch; background: var(--line); }
+  #video input[type=range] { width: 120px; }
+  .switch { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--muted); font-size: 13px; }
+  .switch input { accent-color: var(--accent); }
+
+  .card {
+    display: grid; grid-template-columns: 84px 1fr auto; gap: 16px;
+    align-items: center; margin-top: 12px; padding: 14px 16px;
+    background: var(--panel); backdrop-filter: blur(10px);
+    border: 1px solid var(--line-soft); border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    animation: pop .22s ease-out;
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: none; }
+  }
+  .thumb {
+    width: 84px; height: 62px; border-radius: 12px; object-fit: cover;
+    background: var(--panel-2); display: grid; place-items: center;
+    color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .04em;
+    overflow: hidden; border: 1px solid var(--line-soft);
+  }
+  .name { font-size: 14.5px; font-weight: 600; word-break: break-all; }
+  .meta { color: var(--muted); font-size: 12.5px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .meta .gain { color: var(--ok); font-weight: 650; }
+  .meta .bad { color: var(--err); font-weight: 650; }
+  .bar {
+    height: 6px; background: rgba(255, 255, 255, .07); border-radius: 999px;
+    margin-top: 10px; overflow: hidden;
+  }
+  .bar > i {
+    display: block; height: 100%; width: 0; border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width .2s;
+  }
+  .badge {
+    display: inline-block; margin-top: 8px; padding: 3px 9px; border-radius: 999px;
+    font-size: 11.5px; background: rgba(240, 189, 107, .13); color: var(--warn);
+    border: 1px solid rgba(240, 189, 107, .22);
+  }
+  .actions { display: flex; flex-direction: column; gap: 6px; }
+  .actions a {
+    color: #0b0d12; font-size: 13px; font-weight: 650; text-decoration: none;
+    border-radius: 10px; padding: 8px 14px; text-align: center;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: 0 8px 20px rgba(122, 162, 255, .28);
+  }
+  .actions a:hover { filter: brightness(1.08); }
+
+  .note { color: var(--muted); font-size: 12.5px; margin-top: 26px; line-height: 1.65; max-width: 76ch; }
+  .note code {
+    background: var(--panel-2); padding: 1px 6px; border-radius: 6px;
+    border: 1px solid var(--line-soft); font-size: 12px;
+  }
+  .note strong { color: var(--text); }
+
+  @media (max-width: 560px) {
+    main { padding: 28px 14px 70px; }
+    h1 { font-size: 24px; }
+    .card { grid-template-columns: 64px 1fr; }
+    .thumb { width: 64px; height: 48px; }
+    .actions { grid-column: 1 / -1; }
+    .actions a { padding: 10px; }
+  }
+</style>
+</head>
+<body>
+<div id="wall" aria-hidden="true"></div>
+<main>
+  <header>
+    <h1>Compactor</h1>
+    <span class="stamp">67</span>
+  </header>
+  <p class="sub">Compression sans perte par mélange de contextes. Rien ne quitte votre machine&nbsp;: tout est traité par le processus local.</p>
+
+  <div id="drop" tabindex="0">
+    <strong>Déposez vos fichiers ici</strong>
+    <span>ou collez (Ctrl+V) une image ou une vidéo, ou cliquez pour parcourir</span>
+    <input id="picker" type="file" multiple hidden>
+  </div>
+
+  <div class="controls">
+    <label for="level">Niveau <span id="levelOut">6</span></label>
+    <input id="level" type="range" min="0" max="9" step="1" value="6">
+    <label for="op">Opération</label>
+    <select id="op">
+      <option value="auto">Auto</option>
+      <option value="compress">Compresser</option>
+      <option value="decompress">Décompresser</option>
+      <option value="video" id="opVideo" hidden>Ré-encoder la vidéo (avec perte)</option>
+      <option value="convert" id="opConvert" hidden>Convertir le format</option>
+    </select>
+    <button id="clear" type="button">Vider la liste</button>
+  </div>
+
+  <div class="controls" id="video" hidden>
+    <label for="vres">Résolution</label>
+    <select id="vres">
+      <option value="">Source</option>
+      <option value="2160">2160p</option>
+      <option value="1440">1440p</option>
+      <option value="1080">1080p</option>
+      <option value="720">720p</option>
+      <option value="480">480p</option>
+      <option value="360">360p</option>
+    </select>
+    <input id="vw" type="number" min="16" max="7680" placeholder="largeur">
+    <input id="vh" type="number" min="16" max="7680" placeholder="hauteur">
+    <div class="sep"></div>
+    <label for="vfps">FPS</label>
+    <input id="vfps" type="number" min="1" max="240" step="0.001" placeholder="source" list="fpsList">
+    <datalist id="fpsList">
+      <option value="60"></option><option value="50"></option>
+      <option value="30"></option><option value="25"></option>
+      <option value="24"></option><option value="15"></option>
+      <option value="12"></option><option value="10"></option>
+    </datalist>
+    <div class="sep"></div>
+    <label for="vcrf">Qualité <span id="crfOut">28</span></label>
+    <input id="vcrf" type="range" min="0" max="51" step="1" value="28">
+    <label for="vcodec">Codec</label>
+    <select id="vcodec">
+      <option value="h264">H.264</option>
+      <option value="h265">H.265</option>
+      <option value="vp9">VP9</option>
+      <option value="av1">AV1</option>
+    </select>
+    <label class="switch"><input id="vaudio" type="checkbox" checked> Audio</label>
+  </div>
+
+  <div class="controls" id="convert" hidden>
+    <label for="cto">Convertir en</label>
+    <select id="cto"></select>
+    <div class="sep"></div>
+    <label for="cq">Qualité <span id="cqOut">75</span></label>
+    <input id="cq" type="range" min="0" max="100" step="1" value="75">
+    <div class="sep"></div>
+    <label for="cw">Taille</label>
+    <input id="cw" type="number" min="16" max="7680" placeholder="largeur">
+    <input id="ch" type="number" min="16" max="7680" placeholder="hauteur">
+    <label for="cfps">FPS</label>
+    <input id="cfps" type="number" min="1" max="240" step="0.001" placeholder="source" list="fpsList">
+    <label class="switch"><input id="caudio" type="checkbox" checked> Audio</label>
+  </div>
+
+  <div id="list"></div>
+
+  <p class="note">
+    Le niveau règle la mémoire du modèle et le taux&nbsp;: 0 est léger, 9 utilise
+    plusieurs centaines de Mio. Le débit tourne autour de 0,4&nbsp;Mio/s dans les
+    deux sens, donc un fichier de 100&nbsp;Mio prend plusieurs minutes.
+    Les archives produites portent l'extension <code>.cpt</code> et se
+    redéposent ici pour être décompressées.
+  </p>
+
+  <p class="note" id="convertNote" hidden>
+    La conversion passe elle aussi par <code>ffmpeg</code>. Une vidéo vers
+    <code>gif</code> ou <code>webp</code> donne une animation&nbsp;; vers
+    <code>png</code>, <code>jpg</code>, <code>bmp</code> ou <code>tiff</code>
+    seule la première image est écrite&nbsp;; vers <code>mp3</code>,
+    <code>m4a</code>, <code>opus</code>, <code>ogg</code>, <code>flac</code> ou
+    <code>wav</code> seule la piste audio est gardée. La qualité va de 0 à 100 et
+    est traduite dans l'échelle propre à chaque encodeur&nbsp;; elle ne change
+    rien pour PNG, FLAC et WAV, qui sont sans perte.
+  </p>
+
+  <p class="note" id="videoNote" hidden>
+    Le ré-encodage vidéo est <strong>avec perte</strong>&nbsp;: il n'a rien à voir
+    avec le codec sans perte ci-dessus, il jette des pixels et des images pour
+    réduire la taille. Il passe par <code>ffmpeg</code>, qui doit être présent
+    dans le PATH. Laisser la largeur ou la hauteur vide conserve les proportions&nbsp;;
+    remplir les deux étire l'image. La qualité est un CRF&nbsp;: plus bas =
+    meilleure image et fichier plus gros.
+  </p>
+</main>
+
+<script>
+(() => {
+  "use strict";
+  const drop = document.getElementById("drop");
+  const picker = document.getElementById("picker");
+  const list = document.getElementById("list");
+  const level = document.getElementById("level");
+  const levelOut = document.getElementById("levelOut");
+  const opSel = document.getElementById("op");
+  const videoBox = document.getElementById("video");
+  const vres = document.getElementById("vres");
+  const vw = document.getElementById("vw");
+  const vh = document.getElementById("vh");
+  const vfps = document.getElementById("vfps");
+  const vcrf = document.getElementById("vcrf");
+  const crfOut = document.getElementById("crfOut");
+  const vcodec = document.getElementById("vcodec");
+  const vaudio = document.getElementById("vaudio");
+  const convBox = document.getElementById("convert");
+  const cto = document.getElementById("cto");
+  const cq = document.getElementById("cq");
+  const cqOut = document.getElementById("cqOut");
+  const cw = document.getElementById("cw");
+  const ch = document.getElementById("ch");
+  const cfps = document.getElementById("cfps");
+  const caudio = document.getElementById("caudio");
+
+
+  // Decorative background: a field of 67s, generated here rather than written
+  // out in the markup so the page stays readable and the layout adapts to the
+  // window. Nothing below depends on it.
+  (function wall() {
+    const host = document.getElementById("wall");
+    if (!host) return;
+    const COUNT = 67;
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < COUNT; i++) {
+      const b = document.createElement("b");
+      b.textContent = "67";
+      const size = 14 + Math.random() * 62;
+      b.style.left = (Math.random() * 100).toFixed(2) + "%";
+      b.style.top = (Math.random() * 100).toFixed(2) + "%";
+      b.style.fontSize = size.toFixed(1) + "px";
+      // Bigger digits sit further back, so the field reads as depth instead of
+      // a flat wall of noise.
+      b.style.opacity = (0.10 - size / 1400).toFixed(3);
+      b.style.setProperty("--rot", (Math.random() * 40 - 20).toFixed(1) + "deg");
+      b.style.animationDuration = (6 + Math.random() * 9).toFixed(1) + "s";
+      b.style.animationDelay = (-Math.random() * 10).toFixed(1) + "s";
+      frag.appendChild(b);
+    }
+    host.appendChild(frag);
+  })();
+
+  let maxSize = Infinity;
+  let hasFfmpeg = false;
+  fetch("/api/config").then(r => r.json()).then(c => {
+    level.value = c.default_level;
+    level.max = c.max_level;
+    levelOut.textContent = c.default_level;
+    maxSize = c.max_size;
+    hasFfmpeg = !!c.ffmpeg;
+    document.getElementById("opVideo").hidden = !hasFfmpeg;
+    document.getElementById("videoNote").hidden = !hasFfmpeg;
+    document.getElementById("opConvert").hidden = !hasFfmpeg;
+    document.getElementById("convertNote").hidden = !hasFfmpeg;
+    fillFormats(c.formats || []);
+  }).catch(() => {});
+
+  level.oninput = () => { levelOut.textContent = level.value; };
+  vcrf.oninput = () => { crfOut.textContent = vcrf.value; };
+  vres.onchange = () => {
+    // A preset fixes the height only; the width follows the aspect ratio.
+    vh.value = vres.value;
+    if (vres.value) vw.value = "";
+  };
+  // vp9 and av1 accept a wider CRF range than x264/x265.
+  vcodec.onchange = () => {
+    const max = (vcodec.value === "vp9" || vcodec.value === "av1") ? 63 : 51;
+    vcrf.max = max;
+    if (+vcrf.value > max) { vcrf.value = max; crfOut.textContent = max; }
+  };
+  // The server owns the format list: it knows which ones its ffmpeg build was
+  // asked to produce, and grouping by kind keeps a 16-entry list readable.
+  function fillFormats(formats) {
+    const groups = {
+      video: "Vidéo",
+      animation: "Animation",
+      image: "Image",
+      audio: "Audio"
+    };
+    for (const kind of Object.keys(groups)) {
+      const wanted = formats.filter(f => f.kind === kind);
+      if (!wanted.length) continue;
+      const g = document.createElement("optgroup");
+      g.label = groups[kind];
+      for (const f of wanted) {
+        const o = document.createElement("option");
+        o.value = f.ext;
+        o.textContent = f.label;
+        g.appendChild(o);
+      }
+      cto.appendChild(g);
+    }
+  }
+
+  cq.oninput = () => { cqOut.textContent = cq.value; };
+  opSel.onchange = () => {
+    videoBox.hidden = opSel.value !== "video";
+    convBox.hidden = opSel.value !== "convert";
+    level.disabled = opSel.value === "video" || opSel.value === "convert";
+  };
+  document.getElementById("clear").onclick = () => { list.innerHTML = ""; };
+
+  // Formats already carrying their own entropy coder. A lossless pass over them
+  // gains almost nothing, so we say so up front rather than let the user wait.
+  const PACKED = /^(image\/(jpeg|png|webp|gif|avif|heic|heif)|video\/|audio\/|application\/(zip|gzip|x-7z|x-rar|x-xz|zstd))/;
+
+  function human(n) {
+    const u = ["o", "Kio", "Mio", "Gio"];
+    let i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return i === 0 ? n + " o" : v.toFixed(2) + " " + u[i];
+  }
+
+  function clock(ms) {
+    const t = Math.max(0, Math.round(ms / 1000));
+    return Math.floor(t / 60) + ":" + String(t % 60).padStart(2, "0");
+  }
+
+  function makeCard(file) {
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    thumb.textContent = (file.name.split(".").pop() || "?").slice(0, 6).toUpperCase();
+    if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
+      const url = URL.createObjectURL(file);
+      const el = document.createElement(file.type.startsWith("image/") ? "img" : "video");
+      el.src = url;
+      el.className = "thumb";
+      if (el.tagName === "VIDEO") { el.muted = true; el.playsInline = true; }
+      el.onload = el.onloadeddata = () => URL.revokeObjectURL(url);
+      thumb.replaceWith(el);
+      card.appendChild(el);
+    } else {
+      card.appendChild(thumb);
+    }
+
+    const mid = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = file.name;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = human(file.size) + " — en attente";
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const fill = document.createElement("i");
+    bar.appendChild(fill);
+    mid.append(name, meta, bar);
+    if (PACKED.test(file.type)) {
+      const badge = document.createElement("div");
+      badge.className = "badge";
+      badge.textContent = (file.type.startsWith("video/") && hasFfmpeg)
+        ? "Vidéo déjà compressée — pour la réduire, choisissez « Ré-encoder la vidéo »"
+        : "Format déjà compressé — gain attendu très faible";
+      mid.appendChild(badge);
+    }
+    card.appendChild(mid);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    card.appendChild(actions);
+
+    list.prepend(card);
+    return { meta, fill, actions };
+  }
+
+  async function submit(file) {
+    const ui = makeCard(file);
+    if (file.size === 0) { fail(ui, "fichier vide"); return; }
+    if (file.size > maxSize) { fail(ui, "fichier plus gros que la limite du serveur (" + human(maxSize) + ")"); return; }
+
+    ui.meta.textContent = human(file.size) + " — envoi…";
+    const q = new URLSearchParams({
+      op: opSel.value,
+      level: level.value,
+      name: file.name
+    });
+    if (opSel.value === "convert") {
+      q.set("to", cto.value);
+      q.set("quality", cq.value);
+      if (cw.value) q.set("width", cw.value);
+      if (ch.value) q.set("height", ch.value);
+      if (cfps.value) q.set("fps", cfps.value);
+      q.set("audio", caudio.checked ? "1" : "0");
+    }
+    if (opSel.value === "video") {
+      if (vw.value) q.set("width", vw.value);
+      if (vh.value) q.set("height", vh.value);
+      if (vfps.value) q.set("fps", vfps.value);
+      q.set("crf", vcrf.value);
+      q.set("codec", vcodec.value);
+      q.set("preset", "medium");
+      q.set("audio", vaudio.checked ? "1" : "0");
+    }
+    let id;
+    try {
+      const r = await fetch("/api/jobs?" + q, { method: "POST", body: file });
+      const j = await r.json();
+      if (!r.ok) { fail(ui, j.error || r.statusText); return; }
+      id = j.id;
+    } catch (e) {
+      fail(ui, "envoi impossible : " + e.message);
+      return;
+    }
+    poll(id, file, ui);
+  }
+
+  function fail(ui, msg) {
+    ui.meta.innerHTML = "";
+    const s = document.createElement("span");
+    s.className = "bad";
+    s.textContent = "Échec : " + msg;
+    ui.meta.appendChild(s);
+    ui.fill.style.background = "var(--err)";
+    ui.fill.style.width = "100%";
+  }
+
+  function poll(id, file, ui) {
+    const tick = async () => {
+      let j;
+      try {
+        const r = await fetch("/api/jobs/" + id);
+        j = await r.json();
+        if (!r.ok) { fail(ui, j.error || r.statusText); return; }
+      } catch (e) {
+        fail(ui, "serveur injoignable"); return;
+      }
+      const pct = j.total ? Math.min(100, j.done * 100 / j.total) : 0;
+      ui.fill.style.width = pct.toFixed(1) + "%";
+      if (j.state === "running") {
+        const verb = j.op === "video" ? "Ré-encodage"
+          : j.op === "convert" ? "Conversion"
+          : j.op === "compress" ? "Compression" : "Décompression";
+        // A video job counts milliseconds of footage, not bytes, and its total
+        // stays 0 while the duration is unknown (no ffprobe): show what has
+        // been encoded so far and no percentage.
+        const amount = j.unit === "ms"
+          ? (j.total ? clock(j.done) + " / " + clock(j.total) : clock(j.done))
+          : human(j.done) + " / " + human(j.total);
+        ui.meta.textContent = j.total
+          ? verb + " " + pct.toFixed(0) + "% — " + amount
+          : verb + " — " + amount;
+        setTimeout(tick, 300);
+        return;
+      }
+      if (j.state === "failed") { fail(ui, j.error); return; }
+      done(id, j, ui);
+    };
+    tick();
+  }
+
+  function done(id, j, ui) {
+    ui.fill.style.width = "100%";
+    ui.fill.style.background = "var(--ok)";
+    const ratio = j.in_size ? j.out_size * 100 / j.in_size : 0;
+    // Only decompression is expected to grow: everywhere else a smaller output
+    // is the good outcome and gets the green number.
+    const gained = j.op === "decompress" ? ratio - 100 : 100 - ratio;
+    const cls = gained > 0.5 ? "gain" : "bad";
+    ui.meta.innerHTML = "";
+    ui.meta.append(
+      document.createTextNode(human(j.in_size) + " → " + human(j.out_size) + " ("),
+      Object.assign(document.createElement("span"), {
+        className: cls,
+        textContent: ratio.toFixed(2) + "%"
+      }),
+      document.createTextNode(") en " + j.secs.toFixed(1) + " s")
+    );
+
+    const a = document.createElement("a");
+    a.href = "/api/jobs/" + id + "/result";
+    a.textContent = "Télécharger";
+    a.download = "";
+    ui.actions.appendChild(a);
+  }
+
+  function addFiles(files) {
+    for (const f of files) submit(f);
+  }
+
+  drop.onclick = () => picker.click();
+  drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") picker.click(); };
+  picker.onchange = () => { addFiles(picker.files); picker.value = ""; };
+
+  for (const ev of ["dragenter", "dragover"]) {
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hot"); });
+  }
+  for (const ev of ["dragleave", "drop"]) {
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hot"); });
+  }
+  drop.addEventListener("drop", e => { if (e.dataTransfer) addFiles(e.dataTransfer.files); });
+  // The whole window accepts drops so a near miss does not open the file in the
+  // browser and lose the page.
+  window.addEventListener("dragover", e => e.preventDefault());
+  window.addEventListener("drop", e => e.preventDefault());
+
+  window.addEventListener("paste", e => {
+    const files = e.clipboardData && e.clipboardData.files;
+    if (files && files.length) { e.preventDefault(); addFiles(files); }
+  });
+})();
+</script>
+</body>
+</html>
