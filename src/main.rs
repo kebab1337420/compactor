@@ -51,6 +51,8 @@ DOWNLOAD OPTIONS (for `dl`; goes through yt-dlp when present, else curl):
     -c            compress the downloaded file to <name>.cpt and delete the
                   original.
     -l N          level for that compression.
+    --no-cookies  do not pass the browser profile to yt-dlp. YouTube refuses
+                  anonymous downloads, so this trades working for private.
 
 CONVERT OPTIONS (for `convert`; goes through ffmpeg too):
     --to EXT      target format. Also read from the output file name when given.
@@ -68,6 +70,8 @@ struct Opts {
     max_size: usize,
     /// `dl -c`: compress what was downloaded.
     compress: bool,
+    /// `dl --no-cookies`: do not let yt-dlp read the browser profile.
+    no_cookies: bool,
     to: Option<String>,
     quality: u8,
     video: video::Settings,
@@ -91,6 +95,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         host: "127.0.0.1".to_string(),
         max_size: 512,
         compress: false,
+        no_cookies: false,
         to: None,
         quality: 75,
         video: video::Settings::default(),
@@ -187,6 +192,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             }
             "--no-audio" => o.video.audio = false,
             "-c" | "--compress" => o.compress = true,
+            "--no-cookies" => o.no_cookies = true,
             "-f" | "--force" => o.force = true,
             "-q" | "--quiet" => o.quiet = true,
             s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option {s}")),
@@ -466,7 +472,7 @@ fn run_download(opts: &Opts, url: &str) -> Result<(), String> {
 
     let t = Instant::now();
     let mut last = 0usize;
-    let fetched = download::fetch(tool, url, &scratch, |bytes| {
+    let fetched = download::fetch(tool, url, &scratch, !opts.no_cookies, |bytes| {
         if opts.quiet || bytes == last {
             return;
         }

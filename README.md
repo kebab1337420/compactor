@@ -145,6 +145,17 @@ side of the transfer.
 through its generic extractor *and* the media sites `curl` cannot see, so
 nothing is lost by picking it first.
 
+YouTube needs one more thing: a session. An anonymous request is answered
+either with "only images are available" or with a 403 a few megabytes into the
+transfer — the media URL is handed out and then refused. So when the downloader
+is `yt-dlp`, the first browser profile found on the machine (Firefox, then
+Chrome, Edge, Brave, Vivaldi, Chromium) is passed as `--cookies-from-browser`
+and yt-dlp reads its cookies. Nothing leaves the machine that was not already
+going to the site being downloaded, and `--no-cookies` on the CLI or the switch
+in the download tab turns it off — at the cost of YouTube refusing the download.
+A JavaScript runtime (`node`, `deno` or `bun`) is passed the same way when one
+is installed: YouTube's player challenge needs it.
+
 A video comes back as MP4 whenever the site offers one, because that is the
 container the browser preview, ffmpeg and whatever the file ends up on all read
 without argument. Sites that only serve VP9/Opus — YouTube above 1080p, mostly —

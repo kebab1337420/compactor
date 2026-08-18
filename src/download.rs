@@ -85,6 +85,7 @@ pub fn fetch(
     tool: Tool,
     url: &str,
     dir: &Path,
+    cookies: bool,
     mut progress: impl FnMut(usize),
 ) -> Result<PathBuf, String> {
     check_url(url)?;
@@ -103,7 +104,24 @@ pub fn fetch(
                 // Long titles are truncated: some filesystems still cap a
                 // component at 255 bytes.
                 "%(title).150s.%(ext)s",
+                // A 403 in the middle of a long transfer is routine on
+                // YouTube: the media URL expires and yt-dlp has to ask for a
+                // fresh one. Without these it gives up on the first refusal.
+                "--retries",
+                "10",
+                "--fragment-retries",
+                "10",
+                "--extractor-retries",
+                "3",
             ]);
+            if let Some(rt) = js_runtime() {
+                cmd.args(["--js-runtimes", rt]);
+            }
+            if cookies {
+                if let Some(browser) = browser_profile() {
+                    cmd.args(["--cookies-from-browser", browser]);
+                }
+            }
             cmd.args(mp4_args(crate::video::available()));
             cmd.args(["--", url]);
         }
@@ -174,6 +192,120 @@ pub fn fetch(
     }
     progress(dir_size(dir));
     found.ok_or_else(|| format!("{} n'a produit aucun fichier", tool.name()))
+}
+
+/// The first browser with a profile on this machine, for
+/// `--cookies-from-browser`.
+///
+/// YouTube now answers an unauthenticated download with either "only images
+/// are available" or a 403 a few megabytes into the transfer — the video URL
+/// is handed out and then refused. A logged-in session from the user's own
+/// browser is what makes the request look like a person; it is also the one
+/// remedy that does not involve a second daemon.
+///
+/// Only the profile directory is looked for here, and yt-dlp is what actually
+/// reads the cookie database. The caller can turn the whole thing off.
+pub fn browser_profile() -> Option<&'static str> {
+    for (browser, paths) in profile_paths() {
+        if paths.iter().any(|p| !p.is_empty() && Path::new(p).exists()) {
+            return Some(browser);
+        }
+    }
+    None
+}
+
+/// Where each browser keeps the profile holding its cookie database. Firefox
+/// comes first: it is the one yt-dlp can read while the browser is running,
+/// since Chromium locks its database and encrypts the values.
+fn profile_paths() -> Vec<(&'static str, Vec<String>)> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let join = |base: &str, rest: &str| -> String {
+        if base.is_empty() {
+            String::new()
+        } else {
+            Path::new(base).join(rest).to_string_lossy().into_owned()
+        }
+    };
+    if cfg!(windows) {
+        vec![
+            ("firefox", vec![join(&appdata, "Mozilla/Firefox/Profiles")]),
+            ("chrome", vec![join(&local, "Google/Chrome/User Data")]),
+            ("edge", vec![join(&local, "Microsoft/Edge/User Data")]),
+            ("brave", vec![join(&local, "BraveSoftware/Brave-Browser/User Data")]),
+            ("vivaldi", vec![join(&local, "Vivaldi/User Data")]),
+            ("chromium", vec![join(&local, "Chromium/User Data")]),
+        ]
+    } else if cfg!(target_os = "macos") {
+        vec![
+            (
+                "firefox",
+                vec![join(&home, "Library/Application Support/Firefox/Profiles")],
+            ),
+            (
+                "chrome",
+                vec![join(&home, "Library/Application Support/Google/Chrome")],
+            ),
+            (
+                "brave",
+                vec![join(
+                    &home,
+                    "Library/Application Support/BraveSoftware/Brave-Browser",
+                )],
+            ),
+            (
+                "edge",
+                vec![join(&home, "Library/Application Support/Microsoft Edge")],
+            ),
+        ]
+    } else {
+        vec![
+            (
+                "firefox",
+                vec![
+                    join(&home, ".mozilla/firefox"),
+                    join(&home, "snap/firefox/common/.mozilla/firefox"),
+                ],
+            ),
+            ("chrome", vec![join(&home, ".config/google-chrome")]),
+            ("chromium", vec![join(&home, ".config/chromium")]),
+            (
+                "brave",
+                vec![join(&home, ".config/BraveSoftware/Brave-Browser")],
+            ),
+            ("vivaldi", vec![join(&home, ".config/vivaldi")]),
+        ]
+    }
+}
+
+/// A JavaScript runtime for yt-dlp to solve YouTube's player challenge with.
+/// Without one it falls back to a client whose media URLs are refused partway
+/// through the transfer — the download starts, runs for a while and dies on a
+/// 403 — so this is the difference between working and not on every YouTube
+/// link.
+///
+/// Only `deno` is enabled by default, hence the explicit flag; `node` is the
+/// one people actually have installed. The option itself is recent, so older
+/// yt-dlp builds are left alone rather than handed an argument they will
+/// reject.
+fn js_runtime() -> Option<&'static str> {
+    if !supports_js_runtimes() {
+        return None;
+    }
+    ["deno", "node", "bun"].into_iter().find(|rt| probe(rt))
+}
+
+fn supports_js_runtimes() -> bool {
+    Command::new("yt-dlp")
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("--js-runtimes"))
+        .unwrap_or(false)
 }
 
 /// Format selection for yt-dlp: a video comes back as MP4 whenever the site

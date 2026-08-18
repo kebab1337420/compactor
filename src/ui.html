@@ -342,6 +342,7 @@
       <label for="dlUrl">Lien</label>
       <input id="dlUrl" type="url" placeholder="https://exemple.com/fichier.zip" spellcheck="false" autocomplete="off">
       <label class="switch"><input id="dlThen" type="checkbox"> Compresser après</label>
+      <label class="switch" id="dlCookiesLabel" hidden><input id="dlCookies" type="checkbox" checked> Cookies du navigateur</label>
       <button id="dlGo" type="button">Télécharger</button>
       <button id="dlClear" type="button">Vider la liste</button>
     </div>
@@ -356,6 +357,16 @@
       &mdash; et sinon par <code>curl</code>, qui ne gère que les liens directs. &laquo;&nbsp;Compresser après&nbsp;&raquo; applique le codec sans perte
       au fichier reçu et ne renvoie que l'archive <code>.cpt</code>, au niveau
       choisi dans l'onglet Compresseur.
+    </p>
+
+    <p class="note" id="dlCookiesNote" hidden>
+      YouTube refuse désormais un téléchargement anonyme&nbsp;: soit il n'annonce
+      que des images, soit il coupe la vidéo par un 403 après quelques mégaoctets.
+      La parade est la session déjà ouverte dans votre navigateur, ici
+      <strong><span id="dlCookiesName"></span></strong>&nbsp;: <code>yt-dlp</code>
+      lit ses cookies et la requête ressemble enfin à celle d'une personne. Rien
+      n'en sort de la machine, hormis vers le site téléchargé. Décochez la case
+      pour vous en passer &mdash; ce qui échouera sur YouTube.
     </p>
 
     <p class="note" id="dlMissing" hidden>
@@ -395,6 +406,7 @@
   const dlThen = document.getElementById("dlThen");
   const dlList = document.getElementById("dlList");
   const dlGo = document.getElementById("dlGo");
+  const dlCookies = document.getElementById("dlCookies");
 
 
   // Decorative background: a field of 67s, generated here rather than written
@@ -442,6 +454,13 @@
     document.getElementById("dlMissing").hidden = !!dl;
     dlGo.disabled = !dl;
     if (dl === "yt-dlp") dlUrl.placeholder = "https://exemple.com/fichier.zip ou un lien vidéo";
+    // The cookie switch only means something for yt-dlp, and only when a
+    // browser profile was actually found.
+    if (dl === "yt-dlp" && c.cookies) {
+      document.getElementById("dlCookiesLabel").hidden = false;
+      document.getElementById("dlCookiesName").textContent = c.cookies;
+      document.getElementById("dlCookiesNote").hidden = false;
+    }
   }).catch(() => {});
 
   level.oninput = () => { levelOut.textContent = level.value; };
@@ -716,6 +735,7 @@
     ui.meta.textContent = "Connexion…";
     const q = new URLSearchParams({ url: url, level: level.value });
     if (dlThen.checked) q.set("then", "compress");
+    if (dlCookies && !dlCookies.checked) q.set("cookies", "0");
     let id;
     try {
       const r = await fetch("/api/download?" + q, { method: "POST" });

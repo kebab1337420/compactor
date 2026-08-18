@@ -297,13 +297,17 @@ fn handle(srv: &Arc<Server>, stream: TcpStream) -> Result<(), String> {
             &mut out,
             "200 OK",
             &format!(
-                "{{\"default_level\":{},\"max_level\":{},\"max_size\":{},\"ffmpeg\":{},\"downloader\":{},\"formats\":[{}]}}",
+                "{{\"default_level\":{},\"max_level\":{},\"max_size\":{},\"ffmpeg\":{},\"downloader\":{},\"cookies\":{},\"formats\":[{}]}}",
                 srv.default_level,
                 MAX_LEVEL,
                 srv.max_body,
                 srv.ffmpeg,
                 match srv.downloader {
                     Some(t) => json_string(t.name()),
+                    None => "null".to_string(),
+                },
+                match download::browser_profile() {
+                    Some(b) => json_string(b),
                     None => "null".to_string(),
                 },
                 convert::FORMATS
@@ -757,6 +761,10 @@ fn post_download(srv: &Arc<Server>, req: &Request, out: &mut TcpStream) {
     // `then=compress` chains the codec onto the downloaded bytes, so the file
     // never has to make the round trip through the browser twice.
     let compress_after = query_param(&req.query, "then").as_deref() == Some("compress");
+    // Cookies are on by default because YouTube refuses an anonymous download
+    // outright; `cookies=0` is there for the user who would rather have the
+    // failure than let yt-dlp read their browser profile.
+    let cookies = query_param(&req.query, "cookies").as_deref() != Some("0");
     let level = query_param(&req.query, "level")
         .and_then(|s| s.parse::<u8>().ok())
         .filter(|l| *l <= MAX_LEVEL)
@@ -811,7 +819,7 @@ fn post_download(srv: &Arc<Server>, req: &Request, out: &mut TcpStream) {
 
     let srv2 = Arc::clone(srv);
     thread::spawn(move || {
-        let res = run_download_job(&srv2, id, tool, &url, compress_after, level);
+        let res = run_download_job(&srv2, id, tool, &url, cookies, compress_after, level);
         finish_job(&srv2, id, res);
         *srv2.running.lock().unwrap() -= 1;
     });
@@ -826,6 +834,7 @@ fn run_download_job(
     id: u64,
     tool: download::Tool,
     url: &str,
+    cookies: bool,
     compress_after: bool,
     level: u8,
 ) -> Result<(Vec<u8>, f64), String> {
@@ -837,7 +846,7 @@ fn run_download_job(
 
     let run = || -> Result<Vec<u8>, String> {
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create temp dir: {e}"))?;
-        let file = download::fetch(tool, url, &dir, |bytes| {
+        let file = download::fetch(tool, url, &dir, cookies, |bytes| {
             if let Ok(mut jobs) = srv.jobs.lock() {
                 if let Some(j) = jobs.get_mut(&id) {
                     j.done = bytes;
