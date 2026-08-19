@@ -51,8 +51,9 @@ DOWNLOAD OPTIONS (for `dl`; goes through yt-dlp when present, else curl):
     -c            compress the downloaded file to <name>.cpt and delete the
                   original.
     -l N          level for that compression.
-    --no-cookies  do not pass the browser profile to yt-dlp. YouTube refuses
-                  anonymous downloads, so this trades working for private.
+    --no-cookies  do not pass the browser profile to yt-dlp. YouTube then only
+                  serves the 360p progressive stream, so this trades quality
+                  for privacy.
 
 CONVERT OPTIONS (for `convert`; goes through ffmpeg too):
     --to EXT      target format. Also read from the output file name when given.

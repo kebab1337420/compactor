@@ -81,6 +81,14 @@ pub fn check_url(url: &str) -> Result<(), String> {
 /// `progress` is called with the number of bytes on disk so far, every
 /// [`POLL`]. The total is not known in advance, so the caller shows an
 /// indeterminate progress bar.
+///
+/// With yt-dlp the download is attempted more than once, with different
+/// settings. YouTube hands out adaptive stream URLs and then refuses them with
+/// a 403 partway through unless the request carries a signed-in session, and
+/// there is no way to know in advance which variant this machine can actually
+/// finish — so the attempts run best quality first and stop at the first one
+/// that completes. Every attempt starts from an empty directory, so the
+/// remains of a transfer that died at 8% are never mistaken for the result.
 pub fn fetch(
     tool: Tool,
     url: &str,
@@ -90,62 +98,166 @@ pub fn fetch(
 ) -> Result<PathBuf, String> {
     check_url(url)?;
 
-    let mut cmd = Command::new(tool.name());
-    match tool {
-        Tool::YtDlp => {
-            cmd.args([
-                "--no-playlist",
-                // Progress on its own lines instead of carriage returns, and
-                // no `.part` file left behind if the transfer dies.
-                "--newline",
-                "--no-part",
-                "--restrict-filenames",
-                "-o",
-                // Long titles are truncated: some filesystems still cap a
-                // component at 255 bytes.
-                "%(title).150s.%(ext)s",
-                // A 403 in the middle of a long transfer is routine on
-                // YouTube: the media URL expires and yt-dlp has to ask for a
-                // fresh one. Without these it gives up on the first refusal.
-                "--retries",
-                "10",
-                "--fragment-retries",
-                "10",
-                "--extractor-retries",
-                "3",
-            ]);
-            if let Some(rt) = js_runtime() {
-                cmd.args(["--js-runtimes", rt]);
-            }
-            if cookies {
-                if let Some(browser) = browser_profile() {
-                    cmd.args(["--cookies-from-browser", browser]);
+    let plans = match tool {
+        Tool::YtDlp => ytdlp_plans(cookies),
+        Tool::Curl => vec![Plan::Curl],
+    };
+
+    let mut last = String::new();
+    for (i, plan) in plans.iter().enumerate() {
+        if i > 0 {
+            clear_dir(dir);
+        }
+        let attempt = match plan {
+            Plan::Curl => run_curl(url, dir, &mut progress),
+            plan => run_ytdlp(plan, url, dir, &mut progress),
+        };
+        match attempt {
+            Ok(file) => return ensure_mp4(file, dir),
+            Err(e) => {
+                // yt-dlp saying this means it recognises neither the site nor
+                // the file: a plain link to something it has no extractor for.
+                // Retrying it with other player settings cannot help, and curl
+                // fetches exactly that kind of URL.
+                let plain_link = e.contains("Unsupported URL");
+                last = e;
+                if plain_link {
+                    if probe("curl") {
+                        clear_dir(dir);
+                        return run_curl(url, dir, &mut progress).and_then(|f| ensure_mp4(f, dir));
+                    }
+                    break;
                 }
             }
-            cmd.args(mp4_args(crate::video::available()));
-            cmd.args(["--", url]);
-        }
-        Tool::Curl => {
-            cmd.args([
-                "-L",
-                "--fail",
-                "-sS",
-                // Take the name from the URL, and from Content-Disposition
-                // when the server sends one.
-                "--remote-name",
-                "--remote-header-name",
-                "--",
-                url,
-            ]);
         }
     }
+    clear_dir(dir);
+    Err(last)
+}
+
+/// One way of asking a downloader for the file.
+enum Plan {
+    /// yt-dlp with the browser's cookies: the request then looks like a
+    /// signed-in person, which is what YouTube wants before it will serve the
+    /// adaptive MP4 streams all the way to the end.
+    YtDlpCookies(&'static str),
+    /// yt-dlp as itself. Enough for every site that does not fight back, and
+    /// for YouTube whenever the anonymous player still works.
+    YtDlpPlain,
+    /// yt-dlp restricted to the mobile-web player, whose only format is the
+    /// old single-file progressive MP4 — 360p, and the whole point: that URL
+    /// does not expire mid-transfer. Low quality, but it is what stands
+    /// between a 403 and nothing at all.
+    YtDlpProgressive,
+    Curl,
+}
+
+/// The yt-dlp attempts to make, best quality first. The cookie attempt is only
+/// listed when the user allowed it *and* a browser profile exists to read.
+fn ytdlp_plans(cookies: bool) -> Vec<Plan> {
+    let mut plans = Vec::new();
+    if cookies {
+        if let Some(browser) = browser_profile() {
+            plans.push(Plan::YtDlpCookies(browser));
+        }
+    }
+    plans.push(Plan::YtDlpPlain);
+    plans.push(Plan::YtDlpProgressive);
+    plans
+}
+
+fn run_ytdlp(
+    plan: &Plan,
+    url: &str,
+    dir: &Path,
+    progress: &mut impl FnMut(usize),
+) -> Result<PathBuf, String> {
+    let mut cmd = Command::new("yt-dlp");
+    cmd.args([
+        "--no-playlist",
+        // Progress on its own lines instead of carriage returns, and no
+        // `.part` file left behind if the transfer dies.
+        "--newline",
+        "--no-part",
+        "--restrict-filenames",
+        "-o",
+        // Long titles are truncated: some filesystems still cap a component at
+        // 255 bytes.
+        "%(title).150s.%(ext)s",
+        // A 403 in the middle of a long transfer is routine on YouTube: the
+        // media URL expires and yt-dlp has to ask for a fresh one. Without
+        // these it gives up on the first refusal.
+        "--retries",
+        "10",
+        "--fragment-retries",
+        "10",
+        "--extractor-retries",
+        "3",
+    ]);
+    if let Some(rt) = js_runtime() {
+        cmd.args(["--js-runtimes", rt]);
+    }
+    match plan {
+        Plan::YtDlpCookies(browser) => {
+            cmd.args(["--cookies-from-browser", browser]);
+            cmd.args(mp4_args(crate::video::available()));
+        }
+        Plan::YtDlpProgressive => {
+            // `player_client=mweb` is the one YouTube client still offering a
+            // plain progressive file. The format chain has to be loose here,
+            // because that client offers exactly one format and a strict
+            // selector would simply not match it.
+            cmd.args(["--extractor-args", "youtube:player_client=mweb"]);
+            cmd.args(["-f", "b[ext=mp4]/b"]);
+        }
+        _ => {
+            cmd.args(mp4_args(crate::video::available()));
+        }
+    }
+    cmd.args(["--", url]);
+    run_child(cmd, "yt-dlp", dir, progress)
+}
+
+fn run_curl(url: &str, dir: &Path, progress: &mut impl FnMut(usize)) -> Result<PathBuf, String> {
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-L",
+        "--fail",
+        "-sS",
+        // Take the name from the URL, and from Content-Disposition when the
+        // server sends one.
+        "--remote-name",
+        "--remote-header-name",
+        "--",
+        url,
+    ]);
+    match run_child(cmd, "curl", dir, progress) {
+        Ok(file) => Ok(file),
+        // curl only learns it has no name to write to after the request, and
+        // says so on stderr; retrying with a fixed name is friendlier than
+        // making the user rewrite the URL.
+        Err(e) if e.contains("no length") && newest_file(dir).is_none() => {
+            fetch_curl_fallback(url, dir, progress)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Spawn a downloader in `dir`, poll the directory while it runs, and return
+/// the file it left behind.
+fn run_child(
+    mut cmd: Command,
+    name: &str,
+    dir: &Path,
+    progress: &mut impl FnMut(usize),
+) -> Result<PathBuf, String> {
     let mut child = cmd
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("cannot run {}: {e}", tool.name()))?;
+        .map_err(|e| format!("cannot run {name}: {e}"))?;
 
     // stderr is drained on its own thread: a full pipe would otherwise block
     // the child while we sit in the polling loop below.
@@ -170,11 +282,10 @@ pub fn fetch(
                 progress(dir_size(dir));
                 thread::sleep(POLL);
             }
-            Err(e) => return Err(format!("{} failed: {e}", tool.name())),
+            Err(e) => return Err(format!("{name} failed: {e}")),
         }
     };
 
-    let found = newest_file(dir);
     if !status.success() {
         let tail = log.lock().unwrap().join("; ");
         let tail = if tail.is_empty() {
@@ -182,16 +293,70 @@ pub fn fetch(
         } else {
             tail
         };
-        // curl only learns it has no name to write to after the request, and
-        // says so on stderr; retrying with a fixed name is friendlier than
-        // making the user rewrite the URL.
-        if tool == Tool::Curl && found.is_none() && tail.contains("no length") {
-            return fetch_curl_fallback(url, dir, progress);
-        }
-        return Err(format!("{} : {tail}", tool.name()));
+        return Err(format!("{name} : {tail}"));
     }
     progress(dir_size(dir));
-    found.ok_or_else(|| format!("{} n'a produit aucun fichier", tool.name()))
+    newest_file(dir).ok_or_else(|| format!("{name} n'a produit aucun fichier"))
+}
+
+/// Containers that hold video and that ffmpeg can repackage into MP4 without
+/// touching a single frame. Anything else — an audio track, an archive, a PDF
+/// pulled in by the generic extractor — is returned exactly as it came.
+const REMUXABLE: [&str; 6] = ["webm", "mkv", "mov", "avi", "flv", "ts"];
+
+/// Last word on the container. yt-dlp is already asked for MP4 and told to
+/// remux, but a site that only serves WebM, a yt-dlp too old for
+/// `--remux-video`, or a fallback attempt that had to take whatever was on
+/// offer all end up here with something else. Repackaging is a stream copy, so
+/// it costs seconds and loses nothing; if it fails, the original file is kept
+/// rather than the download thrown away.
+fn ensure_mp4(file: PathBuf, dir: &Path) -> Result<PathBuf, String> {
+    let ext = file
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if !REMUXABLE.contains(&ext.as_str()) || !crate::video::available() {
+        return Ok(file);
+    }
+    let stem = file.file_stem().unwrap_or_default().to_owned();
+    let out = dir.join(&stem).with_extension("mp4");
+    if out == file || out.exists() {
+        return Ok(file);
+    }
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"]);
+    cmd.arg("-i").arg(&file);
+    // Every stream is copied as it is, minus the subtitles: MP4 cannot carry
+    // the WebVTT tracks WebM arrives with, and their presence alone fails the
+    // whole remux.
+    cmd.args(["-map", "0", "-c", "copy", "-sn", "-movflags", "+faststart"]);
+    cmd.arg(&out);
+    match crate::video::run(cmd, |_| {}) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&file);
+            Ok(out)
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(&out);
+            Ok(file)
+        }
+    }
+}
+
+/// Empty the scratch directory between two attempts, so the leftovers of a
+/// transfer that died halfway cannot be picked up as the result of the next.
+fn clear_dir(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// The first browser with a profile on this machine, for
@@ -298,14 +463,19 @@ fn js_runtime() -> Option<&'static str> {
     ["deno", "node", "bun"].into_iter().find(|rt| probe(rt))
 }
 
+/// Whether this yt-dlp knows `--js-runtimes`. Cached: the answer costs a
+/// process launch, and `fetch` now asks once per attempt.
 fn supports_js_runtimes() -> bool {
-    Command::new("yt-dlp")
-        .arg("--help")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("--js-runtimes"))
-        .unwrap_or(false)
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        Command::new("yt-dlp")
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("--js-runtimes"))
+            .unwrap_or(false)
+    })
 }
 
 /// Format selection for yt-dlp: a video comes back as MP4 whenever the site
@@ -342,7 +512,7 @@ fn mp4_args(ffmpeg: bool) -> &'static [&'static str] {
 fn fetch_curl_fallback(
     url: &str,
     dir: &Path,
-    mut progress: impl FnMut(usize),
+    progress: &mut impl FnMut(usize),
 ) -> Result<PathBuf, String> {
     let out = dir.join("telechargement.bin");
     let mut child = Command::new("curl")
