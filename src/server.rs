@@ -327,6 +327,17 @@ fn handle(srv: &Arc<Server>, stream: TcpStream) -> Result<(), String> {
                     .join(",")
             ),
         ),
+        // The clip the page plays once a file is ready. Cached hard: it never
+        // changes for a given build, and re-sending 57 KiB on every job would
+        // be silly.
+        ("GET", "/done.m4a") => send(
+            &mut out,
+            "200 OK",
+            crate::sfx::MIME,
+            "Cache-Control: max-age=86400
+",
+            crate::sfx::SOUND,
+        ),
         ("POST", "/api/jobs") => post_job(srv, &req, &mut out),
         ("POST", "/api/download") => post_download(srv, &req, &mut out),
         ("GET", p) if p.starts_with("/api/jobs/") => get_job(srv, p, &mut out),

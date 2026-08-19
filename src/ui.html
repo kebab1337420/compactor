@@ -667,7 +667,29 @@
     tick();
   }
 
+  // The clip announcing a finished file. One element for the whole page: two
+  // jobs ending together would otherwise talk over each other, and rewinding
+  // the single one keeps the last of them audible.
+  const chime = new Audio("/done.m4a");
+  chime.preload = "auto";
+
+  // Compressing and downloading are the two things worth hearing about; a
+  // conversion or a re-encode stays quiet. The play() promise is rejected when
+  // the browser has not seen a gesture yet, and that is not an error worth
+  // showing.
+  function ding(op) {
+    if (!SOUND_OPS.includes(op)) return;
+    try {
+      chime.currentTime = 0;
+      const p = chime.play();
+      if (p) p.catch(() => {});
+    } catch (e) {}
+  }
+
+  const SOUND_OPS = ["compress", "download", "download-compress"];
+
   function done(id, j, ui) {
+    ding(j.op);
     ui.fill.style.width = "100%";
     ui.fill.style.background = "var(--ok)";
     if (j.name) ui.name.textContent = j.name;

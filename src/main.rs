@@ -3,6 +3,7 @@
 mod convert;
 mod download;
 mod server;
+mod sfx;
 mod video;
 
 use std::fs;
@@ -55,6 +56,11 @@ DOWNLOAD OPTIONS (for `dl`; goes through yt-dlp when present, else curl):
                   serves the 360p progressive stream, so this trades quality
                   for privacy.
 
+SOUND:
+    A short clip is played once a file has been compressed or downloaded, by
+    the browser in the web interface and by ffplay on the command line.
+    --no-sound, or the COMPACTOR_NO_SOUND environment variable, turns it off.
+
 CONVERT OPTIONS (for `convert`; goes through ffmpeg too):
     --to EXT      target format. Also read from the output file name when given.
     --quality N   0..100, higher is better and bigger (default 75). Mapped to
@@ -73,6 +79,8 @@ struct Opts {
     compress: bool,
     /// `dl --no-cookies`: do not let yt-dlp read the browser profile.
     no_cookies: bool,
+    /// `--no-sound`: finish in silence.
+    no_sound: bool,
     to: Option<String>,
     quality: u8,
     video: video::Settings,
@@ -97,6 +105,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
         max_size: 512,
         compress: false,
         no_cookies: false,
+        no_sound: false,
         to: None,
         quality: 75,
         video: video::Settings::default(),
@@ -194,6 +203,7 @@ fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--no-audio" => o.video.audio = false,
             "-c" | "--compress" => o.compress = true,
             "--no-cookies" => o.no_cookies = true,
+            "--no-sound" => o.no_sound = true,
             "-f" | "--force" => o.force = true,
             "-q" | "--quiet" => o.quiet = true,
             s if s.starts_with('-') && s.len() > 1 => return Err(format!("unknown option {s}")),
@@ -284,6 +294,13 @@ fn report(label: &str, original: usize, coded: usize, secs: f64, quiet: bool) {
         human(original),
         human(coded)
     );
+}
+
+/// The clip that says the file is ready, unless the user asked for silence.
+fn ding(opts: &Opts) {
+    if !opts.no_sound {
+        sfx::play();
+    }
 }
 
 fn expect_files(opts: &Opts, max: usize) -> Result<(), String> {
@@ -519,6 +536,7 @@ fn run_download(opts: &Opts, url: &str) -> Result<(), String> {
     }
 
     if !opts.compress {
+        ding(opts);
         println!("{}", out_path.display());
         return Ok(());
     }
@@ -534,6 +552,7 @@ fn run_download(opts: &Opts, url: &str) -> Result<(), String> {
     // never what `-c` was asked for.
     let _ = fs::remove_file(&out_path);
     report("compress", data.len(), blob.len(), secs, opts.quiet);
+    ding(opts);
     println!("{}", cpt.display());
     Ok(())
 }
@@ -600,6 +619,7 @@ fn run() -> Result<(), String> {
                     opts.level
                 );
             }
+            ding(&opts);
         }
         "d" | "x" | "decompress" => {
             expect_files(&opts, 2)?;
