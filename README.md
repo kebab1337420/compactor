@@ -1,4 +1,4 @@
-# Compactor
+# Compactor 67
 
 A lossless, context-mixing compressor written in Rust with no external
 dependencies. It trades speed for compression ratio: on both text and binary
